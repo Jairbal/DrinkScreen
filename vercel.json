@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/music",
+      "destination": "/music.html"
+    }
+  ]
+}

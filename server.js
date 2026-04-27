@@ -426,6 +426,152 @@ function writeMusicQueue(queue) {
   fs.writeFileSync(MUSIC_QUEUE_PATH, `${JSON.stringify({ queue }, null, 2)}\n`, "utf8");
 }
 
+function getSupabaseConfig() {
+  return {
+    url: (process.env.SUPABASE_URL || "").replace(/\/+$/, ""),
+    key: process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || "",
+    table: process.env.SUPABASE_MUSIC_QUEUE_TABLE || "music_queue",
+  };
+}
+
+function hasSupabaseQueueServer() {
+  const config = getSupabaseConfig();
+  return Boolean(config.url && config.key);
+}
+
+function supabaseRestUrl(path) {
+  const config = getSupabaseConfig();
+  return `${config.url}/rest/v1/${path}`;
+}
+
+function supabaseRestHeaders(extra = {}) {
+  const config = getSupabaseConfig();
+  return {
+    apikey: config.key,
+    Authorization: `Bearer ${config.key}`,
+    ...extra,
+  };
+}
+
+function toSupabaseTrack(row) {
+  return {
+    queueId: row.queue_id,
+    addedAt: row.added_at,
+    id: row.spotify_id,
+    uri: row.uri,
+    name: row.name,
+    artists: row.artists,
+    album: row.album,
+    image: row.image,
+    durationMs: row.duration_ms || 0,
+    externalUrl: row.external_url || "",
+  };
+}
+
+function toSupabaseRow(track, position = Date.now()) {
+  return {
+    queue_id: track.queueId || crypto.randomUUID(),
+    added_at: track.addedAt || new Date().toISOString(),
+    spotify_id: track.id || track.uri.split(":").pop(),
+    uri: track.uri,
+    name: track.name || "Cancion de Spotify",
+    artists: track.artists || "",
+    album: track.album || "",
+    image: track.image || "",
+    duration_ms: Number(track.durationMs) || 0,
+    external_url: track.externalUrl || "",
+    position,
+  };
+}
+
+async function readSharedMusicQueue() {
+  if (!hasSupabaseQueueServer()) {
+    return readMusicQueue();
+  }
+
+  const config = getSupabaseConfig();
+  const response = await fetch(
+    supabaseRestUrl(`${config.table}?select=*&order=position.asc,added_at.asc`),
+    {
+      headers: supabaseRestHeaders(),
+    }
+  );
+  const payload = await readSpotifyResponse(response);
+  return Array.isArray(payload) ? payload.map(toSupabaseTrack) : [];
+}
+
+async function addSharedMusicTrack(track) {
+  if (!hasSupabaseQueueServer()) {
+    const queue = readMusicQueue();
+    queue.push(track);
+    writeMusicQueue(queue);
+    return queue;
+  }
+
+  const config = getSupabaseConfig();
+  const response = await fetch(supabaseRestUrl(config.table), {
+    method: "POST",
+    headers: supabaseRestHeaders({
+      "Content-Type": "application/json",
+      Prefer: "return=minimal",
+    }),
+    body: JSON.stringify(toSupabaseRow(track)),
+  });
+  await readSpotifyResponse(response);
+  return readSharedMusicQueue();
+}
+
+async function writeSharedMusicQueueOrder(orderedIds) {
+  const queue = await readSharedMusicQueue();
+  const queueById = new Map(queue.map((track) => [track.queueId, track]));
+  const nextQueue = orderedIds.map((queueId) => queueById.get(queueId)).filter(Boolean);
+
+  for (const track of queue) {
+    if (!nextQueue.includes(track)) {
+      nextQueue.push(track);
+    }
+  }
+
+  if (!hasSupabaseQueueServer()) {
+    writeMusicQueue(nextQueue);
+    return nextQueue;
+  }
+
+  const config = getSupabaseConfig();
+  await Promise.all(
+    nextQueue.map((track, index) =>
+      fetch(supabaseRestUrl(`${config.table}?queue_id=eq.${encodeURIComponent(track.queueId)}`), {
+        method: "PATCH",
+        headers: supabaseRestHeaders({
+          "Content-Type": "application/json",
+          Prefer: "return=minimal",
+        }),
+        body: JSON.stringify({ position: index + 1 }),
+      }).then(readSpotifyResponse)
+    )
+  );
+  return readSharedMusicQueue();
+}
+
+async function deleteSharedMusicTrack(queueId) {
+  if (!hasSupabaseQueueServer()) {
+    const nextQueue = readMusicQueue().filter((track) => track.queueId !== queueId);
+    writeMusicQueue(nextQueue);
+    return nextQueue;
+  }
+
+  const config = getSupabaseConfig();
+  const response = await fetch(
+    supabaseRestUrl(`${config.table}?queue_id=eq.${encodeURIComponent(queueId)}`),
+    {
+      method: "DELETE",
+      headers: supabaseRestHeaders({ Prefer: "return=minimal" }),
+    }
+  );
+  await readSpotifyResponse(response);
+  return readSharedMusicQueue();
+}
+
 function sanitizeMusicTrack(input = {}) {
   const uri = typeof input.uri === "string" ? input.uri : "";
   if (!/^spotify:track:[A-Za-z0-9]+$/.test(uri)) {
@@ -1104,16 +1250,20 @@ function createServer() {
     }
 
     if (pathname === "/api/music-queue" && request.method === "GET") {
-      sendJson(response, 200, {
-        ok: true,
-        queue: readMusicQueue(),
-      });
+      readSharedMusicQueue()
+        .then((queue) => {
+          sendJson(response, 200, {
+            ok: true,
+            queue,
+          });
+        })
+        .catch((error) => sendSpotifyError(response, error));
       return;
     }
 
     if (pathname === "/api/music-queue" && request.method === "POST") {
       readRequestBody(request)
-        .then((body) => {
+        .then(async (body) => {
           const track = sanitizeMusicTrack(body.track || body);
           if (!track) {
             sendJson(response, 400, {
@@ -1123,9 +1273,7 @@ function createServer() {
             return;
           }
 
-          const queue = readMusicQueue();
-          queue.push(track);
-          writeMusicQueue(queue);
+          const queue = await addSharedMusicTrack(track);
           sendJson(response, 200, {
             ok: true,
             track,
@@ -1147,21 +1295,9 @@ function createServer() {
       }
 
       readRequestBody(request)
-        .then((body) => {
+        .then(async (body) => {
           const orderedIds = Array.isArray(body.orderedIds) ? body.orderedIds : [];
-          const queue = readMusicQueue();
-          const queueById = new Map(queue.map((track) => [track.queueId, track]));
-          const nextQueue = orderedIds
-            .map((queueId) => queueById.get(queueId))
-            .filter(Boolean);
-
-          for (const track of queue) {
-            if (!nextQueue.includes(track)) {
-              nextQueue.push(track);
-            }
-          }
-
-          writeMusicQueue(nextQueue);
+          const nextQueue = await writeSharedMusicQueueOrder(orderedIds);
           sendJson(response, 200, {
             ok: true,
             queue: nextQueue,
@@ -1182,10 +1318,9 @@ function createServer() {
       }
 
       readRequestBody(request)
-        .then((body) => {
+        .then(async (body) => {
           const queueId = typeof body.queueId === "string" ? body.queueId : "";
-          const nextQueue = readMusicQueue().filter((track) => track.queueId !== queueId);
-          writeMusicQueue(nextQueue);
+          const nextQueue = await deleteSharedMusicTrack(queueId);
           sendJson(response, 200, {
             ok: true,
             queue: nextQueue,
@@ -1205,29 +1340,28 @@ function createServer() {
         return;
       }
 
-      const queue = readMusicQueue();
-      const nextTrack = queue[0];
-      if (!nextTrack) {
-        sendJson(response, 400, {
-          ok: false,
-          message: "No hay canciones en la lista",
-        });
-        return;
-      }
+      readSharedMusicQueue()
+        .then(async (queue) => {
+          const nextTrack = queue[0];
+          if (!nextTrack) {
+            sendJson(response, 400, {
+              ok: false,
+              message: "No hay canciones en la lista",
+            });
+            return;
+          }
 
-      const credentials = getSpotifyCredentials(request);
-      const endpoint = credentials.deviceId
-        ? `/me/player/play?device_id=${encodeURIComponent(credentials.deviceId)}`
-        : "/me/player/play";
+          const credentials = getSpotifyCredentials(request);
+          const endpoint = credentials.deviceId
+            ? `/me/player/play?device_id=${encodeURIComponent(credentials.deviceId)}`
+            : "/me/player/play";
 
-      spotifyApi(request, endpoint, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ uris: [nextTrack.uri] }),
-      })
-        .then(() => {
-          const nextQueue = queue.slice(1);
-          writeMusicQueue(nextQueue);
+          await spotifyApi(request, endpoint, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ uris: [nextTrack.uri] }),
+          });
+          const nextQueue = await deleteSharedMusicTrack(nextTrack.queueId);
           sendJson(response, 200, {
             ok: true,
             track: nextTrack,

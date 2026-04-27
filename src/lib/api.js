@@ -9,23 +9,80 @@ async function readJson(response) {
   return payload;
 }
 
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "";
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || "";
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
+const MUSIC_QUEUE_TABLE = import.meta.env.VITE_SUPABASE_MUSIC_QUEUE_TABLE || "music_queue";
+
+function apiUrl(path) {
+  return `${API_BASE_URL}${path}`;
+}
+
+function hasSupabaseQueue() {
+  return Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
+}
+
+function supabaseUrl(path) {
+  return `${SUPABASE_URL.replace(/\/+$/, "")}/rest/v1/${path}`;
+}
+
+function supabaseHeaders(extra = {}) {
+  return {
+    apikey: SUPABASE_ANON_KEY,
+    Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+    ...extra,
+  };
+}
+
+function toQueueTrack(row) {
+  return {
+    queueId: row.queue_id,
+    addedAt: row.added_at,
+    id: row.spotify_id,
+    uri: row.uri,
+    name: row.name,
+    artists: row.artists,
+    album: row.album,
+    image: row.image,
+    durationMs: row.duration_ms || 0,
+    externalUrl: row.external_url || "",
+  };
+}
+
+function toQueueRow(track) {
+  const now = new Date().toISOString();
+  return {
+    queue_id: track.queueId || crypto.randomUUID(),
+    added_at: track.addedAt || now,
+    spotify_id: track.id || track.uri?.split(":").pop() || "",
+    uri: track.uri,
+    name: track.name || "Cancion de Spotify",
+    artists: track.artists || "",
+    album: track.album || "",
+    image: track.image || "",
+    duration_ms: Number(track.durationMs) || 0,
+    external_url: track.externalUrl || "",
+    position: Date.now(),
+  };
+}
+
 export async function fetchPlaylist() {
-  return readJson(await fetch("/api/videos", { cache: "no-store" }));
+  return readJson(await fetch(apiUrl("/api/videos"), { cache: "no-store" }));
 }
 
 export async function fetchHealth() {
-  return readJson(await fetch("/api/health", { cache: "no-store" }));
+  return readJson(await fetch(apiUrl("/api/health"), { cache: "no-store" }));
 }
 
 export async function fetchConfig() {
   return readJson(
-    await fetch("/api/config", { cache: "no-store", credentials: "include" })
+    await fetch(apiUrl("/api/config"), { cache: "no-store", credentials: "include" })
   );
 }
 
 export async function saveConfig(payload) {
   return readJson(
-    await fetch("/api/config", {
+    await fetch(apiUrl("/api/config"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -36,13 +93,13 @@ export async function saveConfig(payload) {
 
 export async function fetchSession() {
   return readJson(
-    await fetch("/api/auth/session", { cache: "no-store", credentials: "include" })
+    await fetch(apiUrl("/api/auth/session"), { cache: "no-store", credentials: "include" })
   );
 }
 
 export async function login(payload) {
   return readJson(
-    await fetch("/api/auth/login", {
+    await fetch(apiUrl("/api/auth/login"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -53,7 +110,7 @@ export async function login(payload) {
 
 export async function logout() {
   return readJson(
-    await fetch("/api/auth/logout", {
+    await fetch(apiUrl("/api/auth/logout"), {
       method: "POST",
       credentials: "include",
     })
@@ -62,7 +119,7 @@ export async function logout() {
 
 export async function uploadVideos(formData) {
   return readJson(
-    await fetch("/api/videos/upload", {
+    await fetch(apiUrl("/api/videos/upload"), {
       method: "POST",
       body: formData,
       credentials: "include",
@@ -72,7 +129,7 @@ export async function uploadVideos(formData) {
 
 export async function deleteVideo(videoPath) {
   return readJson(
-    await fetch("/api/videos/delete", {
+    await fetch(apiUrl("/api/videos/delete"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path: videoPath }),
@@ -83,7 +140,7 @@ export async function deleteVideo(videoPath) {
 
 export async function savePlaylistOrder(orderedPaths) {
   return readJson(
-    await fetch("/api/playlist/order", {
+    await fetch(apiUrl("/api/playlist/order"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ orderedPaths }),
@@ -93,16 +150,16 @@ export async function savePlaylistOrder(orderedPaths) {
 }
 
 export async function fetchSpotifyStatus() {
-  return readJson(await fetch("/api/spotify/status", { cache: "no-store" }));
+  return readJson(await fetch(apiUrl("/api/spotify/status"), { cache: "no-store" }));
 }
 
 export async function fetchSpotifyQueue() {
-  return readJson(await fetch("/api/spotify/queue", { cache: "no-store" }));
+  return readJson(await fetch(apiUrl("/api/spotify/queue"), { cache: "no-store" }));
 }
 
 export async function searchSpotifyTracks(query) {
   return readJson(
-    await fetch(`/api/spotify/search?q=${encodeURIComponent(query)}`, {
+    await fetch(apiUrl(`/api/spotify/search?q=${encodeURIComponent(query)}`), {
       cache: "no-store",
     })
   );
@@ -110,7 +167,7 @@ export async function searchSpotifyTracks(query) {
 
 export async function addSpotifyTrackToQueue(uri) {
   return readJson(
-    await fetch("/api/spotify/queue", {
+    await fetch(apiUrl("/api/spotify/queue"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ uri }),
@@ -119,12 +176,42 @@ export async function addSpotifyTrackToQueue(uri) {
 }
 
 export async function fetchMusicQueue() {
-  return readJson(await fetch("/api/music-queue", { cache: "no-store" }));
+  if (hasSupabaseQueue()) {
+    const rows = await readJson(
+      await fetch(
+        supabaseUrl(
+          `${MUSIC_QUEUE_TABLE}?select=*&order=position.asc,added_at.asc`
+        ),
+        {
+          cache: "no-store",
+          headers: supabaseHeaders(),
+        }
+      )
+    );
+    return { ok: true, queue: rows.map(toQueueTrack) };
+  }
+
+  return readJson(await fetch(apiUrl("/api/music-queue"), { cache: "no-store" }));
 }
 
 export async function addTrackToMusicQueue(track) {
+  if (hasSupabaseQueue()) {
+    const row = toQueueRow(track);
+    await readJson(
+      await fetch(supabaseUrl(MUSIC_QUEUE_TABLE), {
+        method: "POST",
+        headers: supabaseHeaders({
+          "Content-Type": "application/json",
+          Prefer: "return=representation",
+        }),
+        body: JSON.stringify(row),
+      })
+    );
+    return fetchMusicQueue();
+  }
+
   return readJson(
-    await fetch("/api/music-queue", {
+    await fetch(apiUrl("/api/music-queue"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ track }),
@@ -134,7 +221,7 @@ export async function addTrackToMusicQueue(track) {
 
 export async function saveMusicQueueOrder(orderedIds) {
   return readJson(
-    await fetch("/api/music-queue/order", {
+    await fetch(apiUrl("/api/music-queue/order"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ orderedIds }),
@@ -145,7 +232,7 @@ export async function saveMusicQueueOrder(orderedIds) {
 
 export async function deleteMusicQueueTrack(queueId) {
   return readJson(
-    await fetch("/api/music-queue/delete", {
+    await fetch(apiUrl("/api/music-queue/delete"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ queueId }),
@@ -156,7 +243,7 @@ export async function deleteMusicQueueTrack(queueId) {
 
 export async function playNextMusicQueueTrack() {
   return readJson(
-    await fetch("/api/music-queue/play-next", {
+    await fetch(apiUrl("/api/music-queue/play-next"), {
       method: "POST",
       credentials: "include",
     })
@@ -165,7 +252,7 @@ export async function playNextMusicQueueTrack() {
 
 export async function playMusicTrackNow(uri) {
   return readJson(
-    await fetch("/api/music-queue/play-now", {
+    await fetch(apiUrl("/api/music-queue/play-now"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ uri }),
@@ -176,7 +263,7 @@ export async function playMusicTrackNow(uri) {
 
 export async function disconnectSpotify() {
   return readJson(
-    await fetch("/api/spotify/disconnect", {
+    await fetch(apiUrl("/api/spotify/disconnect"), {
       method: "POST",
       credentials: "include",
     })

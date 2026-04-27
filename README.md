@@ -133,6 +133,68 @@ powershell -ExecutionPolicy Bypass -File .\scripts\uninstall-autostart.ps1
 - `/api/music-queue/order`: orden de pedidos, protegido por admin.
 - `/api/music-queue/delete`: eliminacion de pedidos, protegido por admin.
 
+## Despliegue hibrido recomendado
+
+Para que los clientes usen `/music` desde datos moviles sin subir los videos a internet:
+
+- Vercel sirve la pagina publica `/music.html`.
+- Supabase guarda la cola de canciones.
+- La PC del local sigue sirviendo `/` y `/admin` con los videos desde `./videos`.
+- La pantalla local consulta Supabase para mostrar la lista de pedidos.
+
+### Supabase
+
+1. Crea un proyecto en Supabase.
+2. Ejecuta el SQL de `docs/supabase-schema.sql` en el SQL Editor.
+3. Copia `Project URL`, `anon public key` y `service_role key`.
+
+En la PC local, agrega al `.env`:
+
+```env
+SUPABASE_URL=https://tu-proyecto.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=tu-service-role-key
+SUPABASE_MUSIC_QUEUE_TABLE=music_queue
+VITE_SUPABASE_URL=https://tu-proyecto.supabase.co
+VITE_SUPABASE_ANON_KEY=tu-anon-key
+VITE_SUPABASE_MUSIC_QUEUE_TABLE=music_queue
+```
+
+En Vercel, configura estas variables:
+
+```env
+SPOTIFY_CLIENT_ID=tu-client-id
+SPOTIFY_CLIENT_SECRET=tu-client-secret
+VITE_SUPABASE_URL=https://tu-proyecto.supabase.co
+VITE_SUPABASE_ANON_KEY=tu-anon-key
+VITE_SUPABASE_MUSIC_QUEUE_TABLE=music_queue
+```
+
+### Vercel
+
+Build command:
+
+```bash
+npm run build
+```
+
+Output directory:
+
+```text
+dist
+```
+
+La URL publica para clientes sera:
+
+```text
+https://tu-dominio.vercel.app/music.html
+```
+
+La TV del local debe seguir usando la URL local para no descargar videos desde internet:
+
+```text
+http://IP_DE_LA_PC:8080/
+```
+
 ## Notas
 
 - El servidor soporta `Range` para reproducir videos grandes con mas fluidez.

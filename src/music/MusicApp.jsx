@@ -74,7 +74,7 @@ function parseSpotifyTrackUri(value) {
 }
 
 export default function MusicApp() {
-  const [status, setStatus] = useState({ loading: true, configured: false, connected: false });
+  const [status, setStatus] = useState({ loading: true, configured: true, connected: false });
   const [query, setQuery] = useState("");
   const [results, setResults] = useState([]);
   const [queue, setQueue] = useState({ queue: [] });
@@ -97,8 +97,7 @@ export default function MusicApp() {
       })
       .catch((requestError) => {
         if (mounted) {
-          setStatus({ loading: false, configured: false, connected: false });
-          setError(getFriendlySpotifyError(requestError.message));
+          setStatus({ loading: false, configured: true, connected: false });
         }
       });
 
