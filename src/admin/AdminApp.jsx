@@ -155,7 +155,7 @@ function MusicQueuePanel({
           disabled={!musicQueue.length || Boolean(musicActionPending)}
           className="rounded-full bg-emerald-400 px-4 py-3 text-xs font-semibold uppercase tracking-[0.14em] text-slate-950 transition hover:bg-emerald-300 disabled:opacity-50"
         >
-          Enviar siguiente a Spotify
+          Reproducir siguiente
         </button>
       </div>
 
@@ -1234,7 +1234,7 @@ export default function AdminApp() {
     try {
       const payload = await playNextMusicQueueTrack();
       setMusicQueue(payload.queue || []);
-      setMessage(`Enviada a Spotify: ${payload.track?.name || "cancion"}`);
+      setMessage(`Reproduciendo siguiente: ${payload.track?.name || "cancion"}`);
       setMessageType("success");
     } catch (error) {
       setMessage(error.message);

@@ -1216,13 +1216,14 @@ function createServer() {
       }
 
       const credentials = getSpotifyCredentials(request);
-      const params = new URLSearchParams({ uri: nextTrack.uri });
-      if (credentials.deviceId) {
-        params.set("device_id", credentials.deviceId);
-      }
+      const endpoint = credentials.deviceId
+        ? `/me/player/play?device_id=${encodeURIComponent(credentials.deviceId)}`
+        : "/me/player/play";
 
-      spotifyApi(request, `/me/player/queue?${params.toString()}`, {
-        method: "POST",
+      spotifyApi(request, endpoint, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uris: [nextTrack.uri] }),
       })
         .then(() => {
           const nextQueue = queue.slice(1);
