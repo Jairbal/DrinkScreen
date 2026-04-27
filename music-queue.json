@@ -1,0 +1,16 @@
+{
+  "queue": [
+    {
+      "queueId": "f1443a33-2dd9-4ba7-b6ef-146d6b520f9f",
+      "addedAt": "2026-04-27T03:13:17.844Z",
+      "id": "3scW7pt0vlhkCCgCNv5YR9",
+      "uri": "spotify:track:3scW7pt0vlhkCCgCNv5YR9",
+      "name": "La Noche Mas Linda",
+      "artists": "Adalberto Santiago",
+      "album": "Sex Symbol",
+      "image": "https://i.scdn.co/image/ab67616d0000b273e4be1c14ef7b4fe0e8511ba5",
+      "durationMs": 343353,
+      "externalUrl": "https://open.spotify.com/track/3scW7pt0vlhkCCgCNv5YR9"
+    }
+  ]
+}
