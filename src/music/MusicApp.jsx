@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   addTrackToMusicQueue,
-  fetchMusicQueue,
   fetchSpotifyStatus,
   searchSpotifyTracks,
+  subscribeToServerEvents,
 } from "../lib/api";
 
 function TrackArtwork({ track, className = "h-16 w-16" }) {
@@ -107,34 +107,17 @@ export default function MusicApp() {
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    let timerId = null;
-
-    async function refreshQueue() {
-      try {
-        const payload = await fetchMusicQueue();
-        if (!cancelled) {
-          setQueue({ queue: payload.queue || [] });
-        }
-      } catch (requestError) {
-        if (!cancelled) {
-          setError(getFriendlySpotifyError(requestError.message));
-        }
-      } finally {
-        if (!cancelled) {
-          timerId = window.setTimeout(refreshQueue, 5000);
-        }
+    return subscribeToServerEvents((event) => {
+      if (event.type !== "music-queue:update") {
+        return;
       }
-    }
 
-    refreshQueue();
-
-    return () => {
-      cancelled = true;
-      if (timerId) {
-        window.clearTimeout(timerId);
+      if (event.payload?.ok) {
+        setQueue({ queue: event.payload.queue || [] });
+      } else if (event.payload?.message) {
+        setError(getFriendlySpotifyError(event.payload.message));
       }
-    };
+    });
   }, []);
 
   useEffect(() => {
@@ -183,6 +166,9 @@ export default function MusicApp() {
       const payload = await addTrackToMusicQueue(track);
       setMessage(`Agregada a la lista: ${track.name}`);
       setQueue({ queue: payload.queue || [] });
+      setQuery("");
+      setResults([]);
+      setSearching(false);
     } catch (requestError) {
       setError(getFriendlySpotifyError(requestError.message));
     } finally {
@@ -200,10 +186,9 @@ export default function MusicApp() {
     setError("");
 
     try {
-      await addTrackToMusicQueue({ uri: pastedTrackUri });
+      const payload = await addTrackToMusicQueue({ uri: pastedTrackUri });
       setMessage("Cancion agregada a la lista.");
       setQuery("");
-      const payload = await fetchMusicQueue();
       setQueue({ queue: payload.queue || [] });
     } catch (requestError) {
       setError(getFriendlySpotifyError(requestError.message));
@@ -231,12 +216,12 @@ export default function MusicApp() {
                 Av. 10 de Agosto y Av. el Inca
               </p>
               <p className="mt-1 text-sm font-semibold text-emerald-200">
-                WhatsApp: +593 95 883 7927
+                Puedes realizar tus pedidos de licores a nuestro WhatsApp: +593 95 883 7927
               </p>
             </div>
           </div>
           <p className="mt-5 text-sm text-slate-400">
-            Elige una pista y se agregara a la lista de pedidos del local. Tambien puedes hacer tus pedidos por WhatsApp.
+            Elige una cancion y agregala a la cola de reproduccion del local.
           </p>
         </header>
 

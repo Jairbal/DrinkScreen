@@ -8,7 +8,6 @@ const ROOT_DIR = __dirname;
 const DIST_DIR = path.join(ROOT_DIR, "dist");
 const ENV_PATH = path.join(ROOT_DIR, ".env");
 const MEDIA_ORDER_PATH = path.join(ROOT_DIR, "media-order.json");
-const MUSIC_QUEUE_PATH = path.join(ROOT_DIR, "music-queue.json");
 const SPOTIFY_TOKEN_PATH = path.join(ROOT_DIR, ".spotify-token.json");
 const SPOTIFY_SCOPES = [
   "user-read-playback-state",
@@ -27,7 +26,11 @@ const DEFAULT_CONFIG = {
 };
 const VIDEO_EXTENSIONS = new Set([".mp4", ".webm", ".ogg", ".mov", ".m4v"]);
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif"]);
+const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+const websocketClients = new Set();
 let spotifyAppToken = null;
+let lastSpotifyPlaybackSnapshot = "";
+let lastSpotifyPlaybackPayload = null;
 loadEnvFile();
 
 function loadEnvFile() {
@@ -369,6 +372,101 @@ async function spotifyAppApi(request, endpoint, options = {}) {
   return readSpotifyResponse(response);
 }
 
+async function getSpotifyDevices(request) {
+  const payload = await spotifyApi(request, "/me/player/devices");
+  return Array.isArray(payload.devices) ? payload.devices : [];
+}
+
+async function transferSpotifyPlayback(request, deviceId) {
+  await spotifyApi(request, "/me/player", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      device_ids: [deviceId],
+      play: false,
+    }),
+  });
+}
+
+async function getActiveSpotifyDevice(request) {
+  const credentials = getSpotifyCredentials(request);
+  if (credentials.deviceId) {
+    return credentials.deviceId;
+  }
+
+  const devices = await getSpotifyDevices(request);
+  const targetDevice =
+    devices.find((device) => device.is_active && !device.is_restricted) ||
+    devices.find((device) => !device.is_restricted);
+
+  if (!targetDevice?.id) {
+    const error = new Error(
+      "No hay un dispositivo activo de Spotify. Abre Spotify en el equipo del local y reproduce cualquier cancion una vez."
+    );
+    error.statusCode = 409;
+    throw error;
+  }
+
+  if (!targetDevice.is_active) {
+    await transferSpotifyPlayback(request, targetDevice.id);
+    await new Promise((resolve) => setTimeout(resolve, 700));
+  }
+
+  return targetDevice.id;
+}
+
+async function playSpotifyTrackNow(request, uri) {
+  const credentials = getSpotifyCredentials(request);
+
+  async function playOnDevice(deviceId = credentials.deviceId) {
+    const endpoint = deviceId
+      ? `/me/player/play?device_id=${encodeURIComponent(deviceId)}`
+      : "/me/player/play";
+    await spotifyApi(request, endpoint, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ uris: [uri] }),
+    });
+  }
+
+  try {
+    await playOnDevice();
+    return;
+  } catch (error) {
+    if (credentials.deviceId || ![404, 403].includes(error.statusCode)) {
+      throw error;
+    }
+  }
+
+  await playOnDevice(await getActiveSpotifyDevice(request));
+}
+
+async function addSpotifyTrackToQueue(request, uri) {
+  const deviceId = await getActiveSpotifyDevice(request);
+  const params = new URLSearchParams({ uri, device_id: deviceId });
+  await spotifyApi(request, `/me/player/queue?${params.toString()}`, {
+    method: "POST",
+  });
+}
+
+async function resumeSpotifyPlayback(request) {
+  const deviceId = await getActiveSpotifyDevice(request);
+  await spotifyApi(request, `/me/player/play?device_id=${encodeURIComponent(deviceId)}`, {
+    method: "PUT",
+  });
+}
+
+async function getSpotifyPlayerState(request) {
+  try {
+    return await spotifyApi(request, "/me/player");
+  } catch (error) {
+    if (error.statusCode === 204) {
+      return null;
+    }
+    throw error;
+  }
+}
+
 function serializeSpotifyImage(images = []) {
   return images.find((image) => image?.url)?.url || "";
 }
@@ -394,6 +492,144 @@ function serializeSpotifyItem(item) {
   };
 }
 
+async function getSpotifyPlaybackSnapshot(request) {
+  const payload = await spotifyApi(request, "/me/player/queue");
+  const queue = Array.isArray(payload.queue)
+    ? payload.queue.slice(0, 12).map(serializeSpotifyItem).filter(Boolean)
+    : [];
+  return {
+    ok: true,
+    connected: true,
+    currentlyPlaying: serializeSpotifyItem(payload.currently_playing),
+    queue: queue.map((track, index) => ({
+      ...track,
+      queueId: `spotify-${index}-${track.id || track.uri}`,
+    })),
+    source: "spotify",
+  };
+}
+
+function getServerSpotifyRequest() {
+  const config = readConfig();
+  return {
+    headers: { host: `localhost:${config.port}` },
+  };
+}
+
+function publishSpotifySnapshot(snapshot, reason) {
+  broadcastEvent("spotify-playback:update", {
+    ...snapshot,
+    reason,
+  });
+  broadcastEvent("music-queue:update", {
+    ok: Boolean(snapshot.ok),
+    connected: Boolean(snapshot.connected),
+    queue: snapshot.queue || [],
+    source: "spotify",
+    reason,
+    message: snapshot.message,
+  });
+}
+
+async function ensureSpotifyKeepsPlaying(request, snapshot = null) {
+  const playback = snapshot || (await getSpotifyPlaybackSnapshot(request));
+  if (playback.currentlyPlaying) {
+    const playerState = await getSpotifyPlayerState(request);
+    if (!playerState?.is_playing) {
+      await resumeSpotifyPlayback(request);
+    }
+    return playback;
+  }
+
+  const nextTrack = playback.queue[0];
+  if (nextTrack?.uri) {
+    try {
+      await resumeSpotifyPlayback(request);
+      const resumed = await getSpotifyPlaybackSnapshot(request);
+      if (resumed.currentlyPlaying) {
+        return resumed;
+      }
+    } catch (error) {
+      // Fall back to direct playback below when Spotify cannot resume the queue.
+    }
+
+    await playSpotifyTrackNow(request, nextTrack.uri);
+    return getSpotifyPlaybackSnapshot(request);
+  }
+
+  return playback;
+}
+
+async function broadcastSpotifyPlayback(reason = "spotify-playback-updated") {
+  try {
+    const request = getServerSpotifyRequest();
+    const rawSnapshot = await getSpotifyPlaybackSnapshot(request);
+    const snapshot = await ensureSpotifyKeepsPlaying(request, rawSnapshot);
+    const signature = JSON.stringify(snapshot);
+    let eventReason = reason;
+    const previousTrackId = lastSpotifyPlaybackPayload?.currentlyPlaying?.id || "";
+    const nextTrackId = snapshot.currentlyPlaying?.id || "";
+    if (reason === "poll" && previousTrackId !== nextTrackId) {
+      if (previousTrackId && !nextTrackId) {
+        eventReason = "track-ended";
+      } else if (!previousTrackId && nextTrackId) {
+        eventReason = "track-started";
+      } else {
+        eventReason = "track-changed";
+      }
+    }
+
+    if (signature !== lastSpotifyPlaybackSnapshot || reason !== "poll") {
+      lastSpotifyPlaybackSnapshot = signature;
+      lastSpotifyPlaybackPayload = snapshot;
+      publishSpotifySnapshot(snapshot, eventReason);
+    }
+    return snapshot;
+  } catch (error) {
+    const snapshot = {
+      ok: false,
+      connected: false,
+      currentlyPlaying: null,
+      queue: [],
+      message: error.message || "No se pudo leer Spotify",
+      reason,
+    };
+    const signature = JSON.stringify(snapshot);
+    if (signature !== lastSpotifyPlaybackSnapshot || reason !== "poll") {
+      lastSpotifyPlaybackSnapshot = signature;
+      lastSpotifyPlaybackPayload = snapshot;
+      broadcastEvent("spotify-playback:update", snapshot);
+    }
+    return snapshot;
+  }
+}
+
+function scheduleSpotifyPlaybackBroadcast(reason, delayMs = 900) {
+  setTimeout(() => {
+    broadcastSpotifyPlayback(reason).catch(() => {});
+  }, delayMs);
+}
+
+function scheduleSpotifyQueueSnapshotBroadcast(reason, delayMs = 900) {
+  setTimeout(async () => {
+    try {
+      const snapshot = await getSpotifyPlaybackSnapshot(getServerSpotifyRequest());
+      lastSpotifyPlaybackSnapshot = JSON.stringify(snapshot);
+      lastSpotifyPlaybackPayload = snapshot;
+      publishSpotifySnapshot(snapshot, reason);
+    } catch (error) {
+      broadcastEvent("spotify-playback:update", {
+        ok: false,
+        connected: false,
+        currentlyPlaying: null,
+        queue: [],
+        message: error.message || "No se pudo leer Spotify",
+        reason,
+      });
+    }
+  }, delayMs);
+}
+
 async function sendSpotifyError(response, error) {
   sendJson(response, error.statusCode || 500, {
     ok: false,
@@ -407,169 +643,6 @@ function writeMediaOrder(orderedPaths) {
     `${JSON.stringify({ orderedPaths }, null, 2)}\n`,
     "utf8"
   );
-}
-
-function readMusicQueue() {
-  if (!fs.existsSync(MUSIC_QUEUE_PATH)) {
-    return [];
-  }
-
-  try {
-    const payload = JSON.parse(fs.readFileSync(MUSIC_QUEUE_PATH, "utf8"));
-    return Array.isArray(payload.queue) ? payload.queue : [];
-  } catch (error) {
-    return [];
-  }
-}
-
-function writeMusicQueue(queue) {
-  fs.writeFileSync(MUSIC_QUEUE_PATH, `${JSON.stringify({ queue }, null, 2)}\n`, "utf8");
-}
-
-function getSupabaseConfig() {
-  return {
-    url: (process.env.SUPABASE_URL || "").replace(/\/+$/, ""),
-    key: process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || "",
-    table: process.env.SUPABASE_MUSIC_QUEUE_TABLE || "music_queue",
-  };
-}
-
-function hasSupabaseQueueServer() {
-  const config = getSupabaseConfig();
-  return Boolean(config.url && config.key);
-}
-
-function supabaseRestUrl(path) {
-  const config = getSupabaseConfig();
-  return `${config.url}/rest/v1/${path}`;
-}
-
-function supabaseRestHeaders(extra = {}) {
-  const config = getSupabaseConfig();
-  return {
-    apikey: config.key,
-    Authorization: `Bearer ${config.key}`,
-    ...extra,
-  };
-}
-
-function toSupabaseTrack(row) {
-  return {
-    queueId: row.queue_id,
-    addedAt: row.added_at,
-    id: row.spotify_id,
-    uri: row.uri,
-    name: row.name,
-    artists: row.artists,
-    album: row.album,
-    image: row.image,
-    durationMs: row.duration_ms || 0,
-    externalUrl: row.external_url || "",
-  };
-}
-
-function toSupabaseRow(track, position = Date.now()) {
-  return {
-    queue_id: track.queueId || crypto.randomUUID(),
-    added_at: track.addedAt || new Date().toISOString(),
-    spotify_id: track.id || track.uri.split(":").pop(),
-    uri: track.uri,
-    name: track.name || "Cancion de Spotify",
-    artists: track.artists || "",
-    album: track.album || "",
-    image: track.image || "",
-    duration_ms: Number(track.durationMs) || 0,
-    external_url: track.externalUrl || "",
-    position,
-  };
-}
-
-async function readSharedMusicQueue() {
-  if (!hasSupabaseQueueServer()) {
-    return readMusicQueue();
-  }
-
-  const config = getSupabaseConfig();
-  const response = await fetch(
-    supabaseRestUrl(`${config.table}?select=*&order=position.asc,added_at.asc`),
-    {
-      headers: supabaseRestHeaders(),
-    }
-  );
-  const payload = await readSpotifyResponse(response);
-  return Array.isArray(payload) ? payload.map(toSupabaseTrack) : [];
-}
-
-async function addSharedMusicTrack(track) {
-  if (!hasSupabaseQueueServer()) {
-    const queue = readMusicQueue();
-    queue.push(track);
-    writeMusicQueue(queue);
-    return queue;
-  }
-
-  const config = getSupabaseConfig();
-  const response = await fetch(supabaseRestUrl(config.table), {
-    method: "POST",
-    headers: supabaseRestHeaders({
-      "Content-Type": "application/json",
-      Prefer: "return=minimal",
-    }),
-    body: JSON.stringify(toSupabaseRow(track)),
-  });
-  await readSpotifyResponse(response);
-  return readSharedMusicQueue();
-}
-
-async function writeSharedMusicQueueOrder(orderedIds) {
-  const queue = await readSharedMusicQueue();
-  const queueById = new Map(queue.map((track) => [track.queueId, track]));
-  const nextQueue = orderedIds.map((queueId) => queueById.get(queueId)).filter(Boolean);
-
-  for (const track of queue) {
-    if (!nextQueue.includes(track)) {
-      nextQueue.push(track);
-    }
-  }
-
-  if (!hasSupabaseQueueServer()) {
-    writeMusicQueue(nextQueue);
-    return nextQueue;
-  }
-
-  const config = getSupabaseConfig();
-  await Promise.all(
-    nextQueue.map((track, index) =>
-      fetch(supabaseRestUrl(`${config.table}?queue_id=eq.${encodeURIComponent(track.queueId)}`), {
-        method: "PATCH",
-        headers: supabaseRestHeaders({
-          "Content-Type": "application/json",
-          Prefer: "return=minimal",
-        }),
-        body: JSON.stringify({ position: index + 1 }),
-      }).then(readSpotifyResponse)
-    )
-  );
-  return readSharedMusicQueue();
-}
-
-async function deleteSharedMusicTrack(queueId) {
-  if (!hasSupabaseQueueServer()) {
-    const nextQueue = readMusicQueue().filter((track) => track.queueId !== queueId);
-    writeMusicQueue(nextQueue);
-    return nextQueue;
-  }
-
-  const config = getSupabaseConfig();
-  const response = await fetch(
-    supabaseRestUrl(`${config.table}?queue_id=eq.${encodeURIComponent(queueId)}`),
-    {
-      method: "DELETE",
-      headers: supabaseRestHeaders({ Prefer: "return=minimal" }),
-    }
-  );
-  await readSpotifyResponse(response);
-  return readSharedMusicQueue();
 }
 
 function sanitizeMusicTrack(input = {}) {
@@ -638,6 +711,165 @@ function sendJson(response, statusCode, payload, extraHeaders = {}) {
     ...extraHeaders,
   });
   response.end(JSON.stringify(payload));
+}
+
+function encodeWebSocketFrame(payload) {
+  const body = Buffer.from(payload);
+  const headerLength = body.length < 126 ? 2 : body.length < 65536 ? 4 : 10;
+  const frame = Buffer.alloc(headerLength + body.length);
+
+  frame[0] = 0x81;
+  if (body.length < 126) {
+    frame[1] = body.length;
+  } else if (body.length < 65536) {
+    frame[1] = 126;
+    frame.writeUInt16BE(body.length, 2);
+  } else {
+    frame[1] = 127;
+    frame.writeBigUInt64BE(BigInt(body.length), 2);
+  }
+
+  body.copy(frame, headerLength);
+  return frame;
+}
+
+function sendWebSocketMessage(socket, event) {
+  if (socket.destroyed) {
+    websocketClients.delete(socket);
+    return;
+  }
+
+  try {
+    socket.write(encodeWebSocketFrame(JSON.stringify(event)));
+  } catch (error) {
+    websocketClients.delete(socket);
+    socket.destroy();
+  }
+}
+
+function broadcastEvent(type, payload = {}) {
+  const event = {
+    type,
+    payload,
+    sentAt: new Date().toISOString(),
+  };
+
+  for (const socket of websocketClients) {
+    sendWebSocketMessage(socket, event);
+  }
+}
+
+function decodeWebSocketFrames(buffer) {
+  const messages = [];
+  let offset = 0;
+
+  while (offset + 2 <= buffer.length) {
+    const firstByte = buffer[offset];
+    const opcode = firstByte & 0x0f;
+    const secondByte = buffer[offset + 1];
+    const masked = Boolean(secondByte & 0x80);
+    let payloadLength = secondByte & 0x7f;
+    let headerLength = 2;
+
+    if (payloadLength === 126) {
+      if (offset + 4 > buffer.length) {
+        break;
+      }
+      payloadLength = buffer.readUInt16BE(offset + 2);
+      headerLength = 4;
+    } else if (payloadLength === 127) {
+      if (offset + 10 > buffer.length) {
+        break;
+      }
+      payloadLength = Number(buffer.readBigUInt64BE(offset + 2));
+      headerLength = 10;
+    }
+
+    const maskOffset = offset + headerLength;
+    const payloadOffset = maskOffset + (masked ? 4 : 0);
+    const nextOffset = payloadOffset + payloadLength;
+    if (nextOffset > buffer.length) {
+      break;
+    }
+
+    if (opcode === 0x8) {
+      messages.push({ type: "close" });
+    } else if (opcode === 0x9) {
+      messages.push({ type: "ping" });
+    } else if (opcode === 0x1) {
+      const payload = Buffer.from(buffer.subarray(payloadOffset, nextOffset));
+      if (masked) {
+        const mask = buffer.subarray(maskOffset, maskOffset + 4);
+        for (let index = 0; index < payload.length; index += 1) {
+          payload[index] ^= mask[index % 4];
+        }
+      }
+      messages.push({ type: "text", data: payload.toString("utf8") });
+    }
+
+    offset = nextOffset;
+  }
+
+  return messages;
+}
+
+function getPlaylistPayload(config = readConfig()) {
+  return {
+    videos: listMedia(config.videoDirectory),
+    settings: {
+      refreshSeconds: config.refreshSeconds,
+      transitionMs: config.transitionMs,
+      imageDurationSeconds: config.imageDurationSeconds,
+      transitionStyle: config.transitionStyle,
+    },
+  };
+}
+
+function getConfigPayload(config = readConfig()) {
+  return {
+    host: config.host,
+    port: config.port,
+    videoDirectory: config.videoDirectory,
+    refreshSeconds: config.refreshSeconds,
+    transitionMs: config.transitionMs,
+    imageDurationSeconds: config.imageDurationSeconds,
+    transitionStyle: config.transitionStyle,
+  };
+}
+
+function broadcastPlaylistUpdate(reason = "playlist-updated") {
+  try {
+    broadcastEvent("playlist:update", {
+      ok: true,
+      reason,
+      ...getPlaylistPayload(),
+    });
+  } catch (error) {
+    console.error("No se pudo emitir la actualizacion del playlist:", error.message);
+  }
+}
+
+async function broadcastMusicQueueUpdate(reason = "music-queue-updated", extra = {}) {
+  if (reason === "track-added") {
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    const snapshot = await getSpotifyPlaybackSnapshot(getServerSpotifyRequest());
+    lastSpotifyPlaybackSnapshot = JSON.stringify(snapshot);
+    lastSpotifyPlaybackPayload = snapshot;
+    publishSpotifySnapshot(snapshot, reason);
+    return snapshot.queue || [];
+  }
+
+  const snapshot = await broadcastSpotifyPlayback(reason);
+  const queue = snapshot.queue || [];
+  broadcastEvent("music-queue:update", {
+    ok: true,
+    connected: Boolean(snapshot.connected),
+    reason,
+    queue,
+    source: "spotify",
+    ...extra,
+  });
+  return queue;
 }
 
 function sendHtml(response, html) {
@@ -994,6 +1226,124 @@ function streamVideo(request, response, filePath) {
   });
 }
 
+function handleWebSocketUpgrade(request, socket) {
+  const requestUrl = new URL(request.url, `http://${request.headers.host || "localhost"}`);
+  if (requestUrl.pathname !== "/ws") {
+    socket.destroy();
+    return;
+  }
+
+  const key = request.headers["sec-websocket-key"];
+  if (!key) {
+    socket.destroy();
+    return;
+  }
+
+  const acceptKey = crypto.createHash("sha1").update(`${key}${WS_GUID}`).digest("base64");
+  socket.write(
+    [
+      "HTTP/1.1 101 Switching Protocols",
+      "Upgrade: websocket",
+      "Connection: Upgrade",
+      `Sec-WebSocket-Accept: ${acceptKey}`,
+      "",
+      "",
+    ].join("\r\n")
+  );
+
+  websocketClients.add(socket);
+  socket.on("close", () => websocketClients.delete(socket));
+  socket.on("error", () => websocketClients.delete(socket));
+  socket.on("data", (buffer) => {
+    for (const message of decodeWebSocketFrames(buffer)) {
+      if (message.type === "close") {
+        websocketClients.delete(socket);
+        socket.end();
+      } else if (message.type === "ping") {
+        socket.write(Buffer.from([0x8a, 0x00]));
+      } else if (message.type === "text") {
+        let payload = {};
+        try {
+          payload = JSON.parse(message.data);
+        } catch (error) {
+          payload = {};
+        }
+
+        if (payload.type === "sync") {
+          sendInitialWebSocketState(socket);
+        }
+      }
+    }
+  });
+
+  sendWebSocketMessage(socket, {
+    type: "connection:ready",
+    payload: { ok: true },
+    sentAt: new Date().toISOString(),
+  });
+  sendInitialWebSocketState(socket);
+}
+
+async function sendInitialWebSocketState(socket) {
+  sendWebSocketMessage(socket, {
+    type: "playlist:update",
+    payload: {
+      ok: true,
+      reason: "initial-sync",
+      ...getPlaylistPayload(),
+    },
+    sentAt: new Date().toISOString(),
+  });
+
+  sendWebSocketMessage(socket, {
+    type: "config:update",
+    payload: {
+      ok: true,
+      reason: "initial-sync",
+      config: getConfigPayload(),
+    },
+    sentAt: new Date().toISOString(),
+  });
+
+  let playback;
+  try {
+    const config = readConfig();
+    playback = await ensureSpotifyKeepsPlaying({
+      headers: { host: `localhost:${config.port}` },
+    });
+  } catch (error) {
+    playback = {
+      ok: false,
+      connected: false,
+      currentlyPlaying: null,
+      queue: [],
+      message: error.message || "No se pudo leer Spotify",
+      reason: "initial-sync",
+    };
+  }
+  sendWebSocketMessage(socket, {
+    type: "spotify-playback:update",
+    payload: {
+      ...playback,
+      reason: "initial-sync",
+    },
+    sentAt: new Date().toISOString(),
+  });
+
+  sendWebSocketMessage(socket, {
+    type: "music-queue:update",
+    payload: {
+      ok: Boolean(playback.ok),
+      connected: Boolean(playback.connected),
+      reason: "initial-sync",
+      queue: playback.queue || [],
+      source: "spotify",
+      message: playback.message,
+    },
+    sentAt: new Date().toISOString(),
+  });
+}
+
 function createServer() {
   return http.createServer((request, response) => {
     const config = readConfig();
@@ -1001,16 +1351,7 @@ function createServer() {
     const pathname = decodeURIComponent(requestUrl.pathname);
 
     if (pathname === "/api/videos") {
-      const playlist = listMedia(config.videoDirectory);
-      sendJson(response, 200, {
-        videos: playlist,
-        settings: {
-          refreshSeconds: config.refreshSeconds,
-          transitionMs: config.transitionMs,
-          imageDurationSeconds: config.imageDurationSeconds,
-          transitionStyle: config.transitionStyle,
-        },
-      });
+      sendJson(response, 200, getPlaylistPayload(config));
       return;
     }
 
@@ -1019,6 +1360,7 @@ function createServer() {
         ok: true,
         videoDirectory: config.videoDirectory,
         distReady: fs.existsSync(path.join(DIST_DIR, "index.html")),
+        musicQueueSource: "spotify",
       });
       return;
     }
@@ -1092,15 +1434,7 @@ function createServer() {
       }
 
       sendJson(response, 200, {
-        config: {
-          host: config.host,
-          port: config.port,
-          videoDirectory: config.videoDirectory,
-          refreshSeconds: config.refreshSeconds,
-          transitionMs: config.transitionMs,
-          imageDurationSeconds: config.imageDurationSeconds,
-          transitionStyle: config.transitionStyle,
-        },
+        config: getConfigPayload(config),
       });
       return;
     }
@@ -1113,18 +1447,17 @@ function createServer() {
       readRequestBody(request)
         .then((body) => {
           const nextConfig = writeConfig(body);
+          const nextConfigPayload = getConfigPayload(nextConfig);
           sendJson(response, 200, {
             ok: true,
-            config: {
-              host: nextConfig.host,
-              port: nextConfig.port,
-              videoDirectory: nextConfig.videoDirectory,
-              refreshSeconds: nextConfig.refreshSeconds,
-              transitionMs: nextConfig.transitionMs,
-              imageDurationSeconds: nextConfig.imageDurationSeconds,
-              transitionStyle: nextConfig.transitionStyle,
-            },
+            config: nextConfigPayload,
           });
+          broadcastEvent("config:update", {
+            ok: true,
+            reason: "config-updated",
+            config: nextConfigPayload,
+          });
+          broadcastPlaylistUpdate("config-updated");
         })
         .catch(() => {
           sendJson(response, 400, {
@@ -1176,6 +1509,7 @@ function createServer() {
             ok: true,
             saved,
           });
+          broadcastPlaylistUpdate("media-uploaded");
         })
         .catch(() => {
           sendJson(response, 400, {
@@ -1206,6 +1540,7 @@ function createServer() {
           const orderedPaths = readMediaOrder().filter((item) => item !== body.path);
           writeMediaOrder(orderedPaths);
           sendJson(response, 200, { ok: true });
+          broadcastPlaylistUpdate("media-deleted");
         })
         .catch(() => {
           sendJson(response, 400, {
@@ -1239,6 +1574,7 @@ function createServer() {
             ok: true,
             orderedPaths,
           });
+          broadcastPlaylistUpdate("playlist-reordered");
         })
         .catch(() => {
           sendJson(response, 400, {
@@ -1250,11 +1586,14 @@ function createServer() {
     }
 
     if (pathname === "/api/music-queue" && request.method === "GET") {
-      readSharedMusicQueue()
-        .then((queue) => {
+      ensureSpotifyKeepsPlaying(request)
+        .then((snapshot) => {
           sendJson(response, 200, {
             ok: true,
-            queue,
+            connected: true,
+            queue: snapshot.queue || [],
+            currentlyPlaying: snapshot.currentlyPlaying || null,
+            source: "spotify",
           });
         })
         .catch((error) => sendSpotifyError(response, error));
@@ -1273,19 +1612,15 @@ function createServer() {
             return;
           }
 
-          const queue = await addSharedMusicTrack(track);
+          await addSpotifyTrackToQueue(request, track.uri);
+          const queue = await broadcastMusicQueueUpdate("track-added", { track });
           sendJson(response, 200, {
             ok: true,
             track,
             queue,
           });
         })
-        .catch(() => {
-          sendJson(response, 400, {
-            ok: false,
-            message: "No se pudo agregar la cancion",
-          });
-        });
+        .catch((error) => sendSpotifyError(response, error));
       return;
     }
 
@@ -1296,11 +1631,12 @@ function createServer() {
 
       readRequestBody(request)
         .then(async (body) => {
-          const orderedIds = Array.isArray(body.orderedIds) ? body.orderedIds : [];
-          const nextQueue = await writeSharedMusicQueueOrder(orderedIds);
-          sendJson(response, 200, {
-            ok: true,
-            queue: nextQueue,
+          const snapshot = await ensureSpotifyKeepsPlaying(request);
+          sendJson(response, 409, {
+            ok: false,
+            queue: snapshot.queue || [],
+            source: "spotify",
+            message: "La cola real de Spotify no se puede reordenar desde la API.",
           });
         })
         .catch(() => {
@@ -1319,11 +1655,12 @@ function createServer() {
 
       readRequestBody(request)
         .then(async (body) => {
-          const queueId = typeof body.queueId === "string" ? body.queueId : "";
-          const nextQueue = await deleteSharedMusicTrack(queueId);
-          sendJson(response, 200, {
-            ok: true,
-            queue: nextQueue,
+          const snapshot = await ensureSpotifyKeepsPlaying(request);
+          sendJson(response, 409, {
+            ok: false,
+            queue: snapshot.queue || [],
+            source: "spotify",
+            message: "La cola real de Spotify no se puede eliminar desde la API.",
           });
         })
         .catch(() => {
@@ -1340,9 +1677,9 @@ function createServer() {
         return;
       }
 
-      readSharedMusicQueue()
-        .then(async (queue) => {
-          const nextTrack = queue[0];
+      ensureSpotifyKeepsPlaying(request)
+        .then(async (snapshot) => {
+          const nextTrack = snapshot.queue?.[0];
           if (!nextTrack) {
             sendJson(response, 400, {
               ok: false,
@@ -1351,17 +1688,9 @@ function createServer() {
             return;
           }
 
-          const credentials = getSpotifyCredentials(request);
-          const endpoint = credentials.deviceId
-            ? `/me/player/play?device_id=${encodeURIComponent(credentials.deviceId)}`
-            : "/me/player/play";
-
-          await spotifyApi(request, endpoint, {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ uris: [nextTrack.uri] }),
-          });
-          const nextQueue = await deleteSharedMusicTrack(nextTrack.queueId);
+          await playSpotifyTrackNow(request, nextTrack.uri);
+          const nextQueue = await broadcastMusicQueueUpdate("track-started", { track: nextTrack });
+          scheduleSpotifyPlaybackBroadcast("track-started");
           sendJson(response, 200, {
             ok: true,
             track: nextTrack,
@@ -1388,18 +1717,16 @@ function createServer() {
             return;
           }
 
-          const credentials = getSpotifyCredentials(request);
-          const endpoint = credentials.deviceId
-            ? `/me/player/play?device_id=${encodeURIComponent(credentials.deviceId)}`
-            : "/me/player/play";
+          await playSpotifyTrackNow(request, uri);
+          scheduleSpotifyPlaybackBroadcast("track-started");
+          const snapshot = await getSpotifyPlaybackSnapshot(request);
 
-          await spotifyApi(request, endpoint, {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ uris: [uri] }),
+          sendJson(response, 200, {
+            ok: true,
+            queue: snapshot.queue || [],
+            currentlyPlaying: snapshot.currentlyPlaying || null,
+            source: "spotify",
           });
-
-          sendJson(response, 200, { ok: true });
         })
         .catch((error) => sendSpotifyError(response, error));
       return;
@@ -1426,21 +1753,22 @@ function createServer() {
       }
 
       clearSpotifyToken();
+      lastSpotifyPlaybackSnapshot = "";
+      lastSpotifyPlaybackPayload = null;
+      broadcastEvent("spotify-playback:update", {
+        ok: false,
+        connected: false,
+        currentlyPlaying: null,
+        queue: [],
+        reason: "spotify-disconnected",
+      });
       sendJson(response, 200, { ok: true });
       return;
     }
 
     if (pathname === "/api/spotify/queue" && request.method === "GET") {
-      spotifyApi(request, "/me/player/queue")
-        .then((payload) => {
-          sendJson(response, 200, {
-            ok: true,
-            currentlyPlaying: serializeSpotifyItem(payload.currently_playing),
-            queue: Array.isArray(payload.queue)
-              ? payload.queue.slice(0, 12).map(serializeSpotifyItem).filter(Boolean)
-              : [],
-          });
-        })
+      ensureSpotifyKeepsPlaying(request)
+        .then((payload) => sendJson(response, 200, payload))
         .catch((error) => sendSpotifyError(response, error));
       return;
     }
@@ -1492,15 +1820,8 @@ function createServer() {
             return;
           }
 
-          const credentials = getSpotifyCredentials(request);
-          const params = new URLSearchParams({ uri });
-          if (credentials.deviceId) {
-            params.set("device_id", credentials.deviceId);
-          }
-
-          await spotifyApi(request, `/me/player/queue?${params.toString()}`, {
-            method: "POST",
-          });
+          await addSpotifyTrackToQueue(request, uri);
+          scheduleSpotifyQueueSnapshotBroadcast("spotify-queue-added");
           sendJson(response, 200, { ok: true });
         })
         .catch((error) => sendSpotifyError(response, error));
@@ -1562,6 +1883,7 @@ function createServer() {
 
       exchangeSpotifyCode(request, code)
         .then(() => {
+          scheduleSpotifyPlaybackBroadcast("spotify-connected", 100);
           response.writeHead(200, {
             "Content-Type": "text/html; charset=utf-8",
             "Cache-Control": "no-cache",
@@ -1626,7 +1948,15 @@ function createServer() {
 const config = readConfig();
 const server = createServer();
 
+server.on("upgrade", handleWebSocketUpgrade);
+
 server.listen(config.port, config.host, () => {
   console.log(`DrinkScreen disponible en http://localhost:${config.port}`);
   console.log(`Videos desde: ${config.videoDirectory}`);
 });
+
+setInterval(() => {
+  if (websocketClients.size > 0) {
+    broadcastSpotifyPlayback("poll").catch(() => {});
+  }
+}, 5000);

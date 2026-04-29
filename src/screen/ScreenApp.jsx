@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { fetchMusicQueue, fetchPlaylist, fetchSpotifyQueue } from "../lib/api";
+import { subscribeToServerEvents } from "../lib/api";
 
 const DEFAULT_SETTINGS = {
   refreshSeconds: 30,
@@ -46,127 +46,79 @@ export default function ScreenApp() {
   }, [activeItem]);
 
   useEffect(() => {
-    let cancelled = false;
-    let timerId = null;
-
-    async function refresh() {
-      try {
-        const payload = await fetchPlaylist();
-        if (cancelled) {
-          return;
+    const unsubscribe = subscribeToServerEvents(
+      (event) => {
+        if (event.type === "playlist:update") {
+          applyPlaylistPayload(event.payload || {});
         }
 
-        const nextPlaylist = (payload.videos || []).map((video) => ({
-          ...video,
-          url: `${video.url}?v=${encodeURIComponent(video.path)}&updated=${encodeURIComponent(
-            video.modifiedAt || ""
-          )}`,
-        }));
-
-        setPlaylist(nextPlaylist);
-        setSettings(payload.settings || DEFAULT_SETTINGS);
-
-        if (!nextPlaylist.length) {
-          stopPlayback();
-          setStatus({
-            title: "No hay contenido disponible",
-            text: "Copia imagenes o videos en la carpeta configurada y la pantalla se actualizara sola.",
-            visible: true,
-          });
-        } else if (!activeItemRef.current) {
-          currentIndexRef.current = 0;
-          await playItemAt(0, nextPlaylist);
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setStatus({
-            title: "No se pudo actualizar la lista",
-            text: "Volveremos a intentarlo automáticamente en unos segundos.",
-            visible: true,
+        if (event.type === "music-queue:update") {
+          setSpotifyQueue({
+            queue: event.payload?.queue || [],
+            connected: Boolean(event.payload?.ok),
           });
         }
-      } finally {
-        if (!cancelled) {
-          timerId = window.setTimeout(refresh, (settingsRef.current.refreshSeconds || 30) * 1000);
+
+        if (event.type === "spotify-playback:update") {
+          setNowPlaying(event.payload?.currentlyPlaying || null);
+          setSpotifyQueue({
+            queue: event.payload?.queue || [],
+            connected: Boolean(event.payload?.connected),
+          });
         }
+      },
+      {
+        onClose: () => {
+          setSpotifyQueue((current) => ({ ...current, connected: false }));
+          setStatus((current) =>
+            activeItemRef.current
+              ? current
+              : {
+                  title: "Reconectando...",
+                  text: "La pantalla esta esperando eventos del servidor.",
+                  visible: true,
+                }
+          );
+        },
       }
-    }
-
-    refresh();
+    );
 
     return () => {
-      cancelled = true;
-      if (timerId) {
-        window.clearTimeout(timerId);
-      }
+      unsubscribe();
       stopPlayback();
     };
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    let timerId = null;
+  async function applyPlaylistPayload(payload) {
+    const nextPlaylist = (payload.videos || []).map((video) => ({
+      ...video,
+      url: `${video.url}?v=${encodeURIComponent(video.path)}&updated=${encodeURIComponent(
+        video.modifiedAt || ""
+      )}`,
+    }));
 
-    async function refreshMusicQueue() {
-      try {
-        const payload = await fetchMusicQueue();
-        if (!cancelled) {
-          setSpotifyQueue({
-            queue: payload.queue || [],
-            connected: true,
-          });
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setSpotifyQueue((current) => ({ ...current, connected: false }));
-        }
-      } finally {
-        if (!cancelled) {
-          timerId = window.setTimeout(refreshMusicQueue, 5000);
-        }
-      }
+    setPlaylist(nextPlaylist);
+    setSettings(payload.settings || DEFAULT_SETTINGS);
+
+    if (!nextPlaylist.length) {
+      stopPlayback();
+      setStatus({
+        title: "No hay contenido disponible",
+        text: "Copia imagenes o videos en la carpeta configurada y la pantalla se actualizara sola.",
+        visible: true,
+      });
+      return;
     }
 
-    refreshMusicQueue();
+    const activeStillExists =
+      activeItemRef.current &&
+      nextPlaylist.some((item) => item.path === activeItemRef.current.path);
 
-    return () => {
-      cancelled = true;
-      if (timerId) {
-        window.clearTimeout(timerId);
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    let timerId = null;
-
-    async function refreshNowPlaying() {
-      try {
-        const payload = await fetchSpotifyQueue();
-        if (!cancelled) {
-          setNowPlaying(payload.currentlyPlaying || null);
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setNowPlaying(null);
-        }
-      } finally {
-        if (!cancelled) {
-          timerId = window.setTimeout(refreshNowPlaying, 5000);
-        }
-      }
+    if (!activeStillExists) {
+      currentIndexRef.current = 0;
+      await playItemAt(0, nextPlaylist);
     }
-
-    refreshNowPlaying();
-
-    return () => {
-      cancelled = true;
-      if (timerId) {
-        window.clearTimeout(timerId);
-      }
-    };
-  }, []);
+  }
 
   function stopPlayback() {
     const video = videoRef.current;

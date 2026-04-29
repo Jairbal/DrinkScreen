@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import {
   addTrackToMusicQueue,
   deleteVideo,
-  deleteMusicQueueTrack,
   disconnectSpotify,
   fetchConfig,
   fetchHealth,
@@ -15,9 +14,9 @@ import {
   playMusicTrackNow,
   playNextMusicQueueTrack,
   saveConfig,
-  saveMusicQueueOrder,
   savePlaylistOrder,
   searchSpotifyTracks,
+  subscribeToServerEvents,
   uploadVideos,
 } from "../lib/api";
 import { formatBytes, formatDate } from "../lib/format";
@@ -127,15 +126,13 @@ function MusicQueuePanel({
   onAddMusicTrack,
   onPlayNextMusicTrack,
   onPlayMusicTrackNow,
-  onMoveMusicTrack,
-  onDeleteMusicTrack,
 }) {
   return (
     <article className="rounded-[2rem] border border-white/10 bg-[#07101f] p-6 shadow-soft">
       <SectionTitle
         eyebrow="Musica"
         title="Pedidos de canciones"
-        description="Agrega canciones y controla el orden que vera la pantalla principal."
+        description="Agrega canciones directo a Spotify. La lista visible viene de la cola real de reproduccion."
       />
 
       <label className="mt-6 block">
@@ -157,6 +154,9 @@ function MusicQueuePanel({
         >
           Reproducir siguiente
         </button>
+        <p className="flex items-center text-xs uppercase tracking-[0.14em] text-slate-500">
+          Fuente: cola real de Spotify
+        </p>
       </div>
 
       {musicSearching ? (
@@ -214,30 +214,6 @@ function MusicQueuePanel({
                 >
                   Reproducir
                 </button>
-                <button
-                  type="button"
-                  onClick={() => onMoveMusicTrack(track.queueId, -1)}
-                  disabled={index === 0 || Boolean(musicActionPending)}
-                  className="rounded-full border border-white/10 px-3 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-white transition hover:bg-white/10 disabled:opacity-40"
-                >
-                  Subir
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onMoveMusicTrack(track.queueId, 1)}
-                  disabled={index === musicQueue.length - 1 || Boolean(musicActionPending)}
-                  className="rounded-full border border-white/10 px-3 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-white transition hover:bg-white/10 disabled:opacity-40"
-                >
-                  Bajar
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onDeleteMusicTrack(track.queueId)}
-                  disabled={musicActionPending === track.queueId}
-                  className="rounded-full border border-red-400/30 bg-red-500/10 px-3 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-red-200 transition hover:bg-red-500/20 disabled:opacity-40"
-                >
-                  Eliminar
-                </button>
               </div>
             </div>
           ))
@@ -247,6 +223,48 @@ function MusicQueuePanel({
           </div>
         )}
       </div>
+    </article>
+  );
+}
+
+function NowPlayingPanel({ track, connected }) {
+  return (
+    <article className="rounded-[2rem] border border-white/10 bg-[#07101f] p-6 shadow-soft">
+      <SectionTitle
+        eyebrow="Spotify"
+        title="Sonando ahora"
+        description="Estado actual de reproduccion tomado directamente de Spotify."
+      />
+
+      {track ? (
+        <div className="mt-6 flex min-w-0 flex-col gap-5 rounded-[1.5rem] border border-emerald-400/20 bg-emerald-400/10 p-4 sm:flex-row sm:items-center">
+          {track.image ? (
+            <img
+              src={track.image}
+              alt=""
+              className="h-28 w-28 flex-none rounded-2xl bg-black object-cover shadow-soft"
+            />
+          ) : (
+            <div className="flex h-28 w-28 flex-none items-center justify-center rounded-2xl bg-black/40 text-3xl font-bold text-emerald-200">
+              ♪
+            </div>
+          )}
+          <div className="min-w-0">
+            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-emerald-200">
+              Reproduciendo
+            </p>
+            <h3 className="mt-2 truncate text-2xl font-semibold text-white">{track.name}</h3>
+            <p className="mt-1 truncate text-sm text-slate-300">{track.artists || "Spotify"}</p>
+            {track.album ? <p className="mt-1 truncate text-xs text-slate-500">{track.album}</p> : null}
+          </div>
+        </div>
+      ) : (
+        <div className="mt-6 rounded-[1.5rem] border border-dashed border-white/10 bg-white/5 p-6 text-sm text-slate-400">
+          {connected
+            ? "Spotify esta conectado, pero no hay una cancion activa en este momento."
+            : "Conecta Spotify para ver la cancion actual."}
+        </div>
+      )}
     </article>
   );
 }
@@ -452,6 +470,7 @@ function DashboardView({
   playlist,
   health,
   spotifyStatus,
+  nowPlaying,
   musicQueue,
   musicSearchQuery,
   musicSearchResults,
@@ -462,8 +481,6 @@ function DashboardView({
   onAddMusicTrack,
   onPlayNextMusicTrack,
   onPlayMusicTrackNow,
-  onMoveMusicTrack,
-  onDeleteMusicTrack,
 }) {
   const totalBytes = useMemo(
     () => playlist.reduce((sum, item) => sum + (item.size || 0), 0),
@@ -599,6 +616,10 @@ function DashboardView({
         </section>
 
         <section className="mt-6">
+          <NowPlayingPanel track={nowPlaying} connected={Boolean(spotifyStatus?.connected)} />
+        </section>
+
+        <section className="mt-6">
           <MusicQueuePanel
             musicQueue={musicQueue}
             musicSearchQuery={musicSearchQuery}
@@ -609,8 +630,6 @@ function DashboardView({
             onAddMusicTrack={onAddMusicTrack}
             onPlayNextMusicTrack={onPlayNextMusicTrack}
             onPlayMusicTrackNow={onPlayMusicTrackNow}
-            onMoveMusicTrack={onMoveMusicTrack}
-            onDeleteMusicTrack={onDeleteMusicTrack}
           />
         </section>
 
@@ -857,6 +876,7 @@ export default function AdminApp() {
   const [health, setHealth] = useState(null);
   const [playlist, setPlaylist] = useState([]);
   const [spotifyStatus, setSpotifyStatus] = useState(null);
+  const [nowPlaying, setNowPlaying] = useState(null);
   const [musicQueue, setMusicQueue] = useState([]);
   const [musicSearchQuery, setMusicSearchQuery] = useState("");
   const [musicSearchResults, setMusicSearchResults] = useState([]);
@@ -875,6 +895,7 @@ export default function AdminApp() {
     setHealth(healthPayload);
     setPlaylist(playlistPayload.videos || []);
     setSpotifyStatus(spotifyPayload);
+    setNowPlaying(musicQueuePayload.currentlyPlaying || null);
     setMusicQueue(musicQueuePayload.queue || []);
     setConfigForm((current) => ({ ...current, ...(configPayload.config || EMPTY_FORM) }));
   }
@@ -951,6 +972,38 @@ export default function AdminApp() {
       mounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!session.authenticated) {
+      return undefined;
+    }
+
+    return subscribeToServerEvents((event) => {
+      if (event.type === "playlist:update") {
+        setPlaylist(event.payload?.videos || []);
+        if (event.payload?.settings) {
+          setConfigForm((current) => ({ ...current, ...event.payload.settings }));
+        }
+      }
+
+      if (event.type === "config:update" && event.payload?.config) {
+        setConfigForm((current) => ({ ...current, ...event.payload.config }));
+      }
+
+      if (event.type === "music-queue:update" && event.payload?.ok) {
+        setMusicQueue(event.payload.queue || []);
+      }
+
+      if (event.type === "spotify-playback:update") {
+        setNowPlaying(event.payload?.currentlyPlaying || null);
+        setMusicQueue(event.payload?.queue || []);
+        setSpotifyStatus((current) => ({
+          ...(current || {}),
+          connected: Boolean(event.payload?.connected),
+        }));
+      }
+    });
+  }, [session.authenticated]);
 
   async function handleLogin(form) {
     setLoginPending(true);
@@ -1179,53 +1232,6 @@ export default function AdminApp() {
     }
   }
 
-  async function persistMusicQueue(nextQueue) {
-    setMusicActionPending("music-order");
-    setMessage("");
-    setMessageType("info");
-
-    try {
-      const payload = await saveMusicQueueOrder(nextQueue.map((track) => track.queueId));
-      setMusicQueue(payload.queue || []);
-      setMessage("Orden de canciones actualizado.");
-      setMessageType("success");
-    } catch (error) {
-      setMessage(error.message);
-      setMessageType("error");
-      await loadDashboard();
-    } finally {
-      setMusicActionPending("");
-    }
-  }
-
-  async function handleMoveMusicTrack(queueId, direction) {
-    const currentIndex = musicQueue.findIndex((track) => track.queueId === queueId);
-    const nextQueue = moveItem(musicQueue, currentIndex, currentIndex + direction);
-    if (nextQueue === musicQueue) {
-      return;
-    }
-    setMusicQueue(nextQueue);
-    await persistMusicQueue(nextQueue);
-  }
-
-  async function handleDeleteMusicTrack(queueId) {
-    setMusicActionPending(queueId);
-    setMessage("");
-    setMessageType("info");
-
-    try {
-      const payload = await deleteMusicQueueTrack(queueId);
-      setMusicQueue(payload.queue || []);
-      setMessage("Cancion eliminada de la lista.");
-      setMessageType("success");
-    } catch (error) {
-      setMessage(error.message);
-      setMessageType("error");
-    } finally {
-      setMusicActionPending("");
-    }
-  }
-
   async function handlePlayNextMusicTrack() {
     setMusicActionPending("play-next");
     setMessage("");
@@ -1250,8 +1256,7 @@ export default function AdminApp() {
     setMessageType("info");
 
     try {
-      await playMusicTrackNow(track.uri);
-      const payload = await deleteMusicQueueTrack(track.queueId);
+      const payload = await playMusicTrackNow(track.uri);
       setMusicQueue(payload.queue || []);
       setMessage(`Reproduciendo ahora: ${track.name}`);
       setMessageType("success");
@@ -1262,6 +1267,19 @@ export default function AdminApp() {
       setMusicActionPending("");
     }
   }
+
+  useEffect(() => {
+    const audioElement = document.getElementById("audio-player");
+    if (audioElement) {
+      audioElement.addEventListener("ended", handlePlayNextMusicTrack);
+    }
+
+    return () => {
+      if (audioElement) {
+        audioElement.removeEventListener("ended", handlePlayNextMusicTrack);
+      }
+    };
+  }, [handlePlayNextMusicTrack]);
 
   if (session.loading) {
     return (
@@ -1308,6 +1326,7 @@ export default function AdminApp() {
         playlist={playlist}
         health={health}
         spotifyStatus={spotifyStatus}
+        nowPlaying={nowPlaying}
         musicQueue={musicQueue}
         musicSearchQuery={musicSearchQuery}
         musicSearchResults={musicSearchResults}
@@ -1318,8 +1337,6 @@ export default function AdminApp() {
         onAddMusicTrack={handleAddMusicTrack}
         onPlayNextMusicTrack={handlePlayNextMusicTrack}
         onPlayMusicTrackNow={handlePlayMusicTrackNow}
-        onMoveMusicTrack={handleMoveMusicTrack}
-        onDeleteMusicTrack={handleDeleteMusicTrack}
       />
     </>
   );

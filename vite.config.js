@@ -7,7 +7,11 @@ module.exports = defineConfig({
     proxy: {
       "/api": "http://localhost:8080",
       "/media": "http://localhost:8080",
-      "/spotify": "http://localhost:8080"
+      "/spotify": "http://localhost:8080",
+      "/ws": {
+        target: "http://localhost:8080",
+        ws: true
+      }
     }
   },
   build: {
