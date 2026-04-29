@@ -16,6 +16,7 @@ import {
   saveConfig,
   savePlaylistOrder,
   searchSpotifyTracks,
+  skipCurrentSpotifyTrack,
   subscribeToServerEvents,
   uploadVideos,
 } from "../lib/api";
@@ -227,7 +228,7 @@ function MusicQueuePanel({
   );
 }
 
-function NowPlayingPanel({ track, connected }) {
+function NowPlayingPanel({ track, connected, pending, onSkip }) {
   return (
     <article className="rounded-[2rem] border border-white/10 bg-[#07101f] p-6 shadow-soft">
       <SectionTitle
@@ -256,6 +257,14 @@ function NowPlayingPanel({ track, connected }) {
             <h3 className="mt-2 truncate text-2xl font-semibold text-white">{track.name}</h3>
             <p className="mt-1 truncate text-sm text-slate-300">{track.artists || "Spotify"}</p>
             {track.album ? <p className="mt-1 truncate text-xs text-slate-500">{track.album}</p> : null}
+            <button
+              type="button"
+              onClick={onSkip}
+              disabled={pending}
+              className="mt-4 rounded-full bg-emerald-400 px-4 py-2 text-xs font-semibold uppercase tracking-[0.14em] text-slate-950 transition hover:bg-emerald-300 disabled:opacity-50"
+            >
+              {pending ? "Saltando..." : "Saltar cancion actual"}
+            </button>
           </div>
         </div>
       ) : (
@@ -476,11 +485,13 @@ function DashboardView({
   musicSearchResults,
   musicSearching,
   musicActionPending,
+  nowPlayingActionPending,
   onDisconnectSpotify,
   onMusicSearchChange,
   onAddMusicTrack,
   onPlayNextMusicTrack,
   onPlayMusicTrackNow,
+  onSkipCurrentTrack,
 }) {
   const totalBytes = useMemo(
     () => playlist.reduce((sum, item) => sum + (item.size || 0), 0),
@@ -616,7 +627,12 @@ function DashboardView({
         </section>
 
         <section className="mt-6">
-          <NowPlayingPanel track={nowPlaying} connected={Boolean(spotifyStatus?.connected)} />
+          <NowPlayingPanel
+            track={nowPlaying}
+            connected={Boolean(spotifyStatus?.connected)}
+            pending={nowPlayingActionPending}
+            onSkip={onSkipCurrentTrack}
+          />
         </section>
 
         <section className="mt-6">
@@ -882,6 +898,7 @@ export default function AdminApp() {
   const [musicSearchResults, setMusicSearchResults] = useState([]);
   const [musicSearching, setMusicSearching] = useState(false);
   const [musicActionPending, setMusicActionPending] = useState("");
+  const [nowPlayingActionPending, setNowPlayingActionPending] = useState(false);
   const [configForm, setConfigForm] = useState(EMPTY_FORM);
 
   async function loadDashboard() {
@@ -1268,6 +1285,23 @@ export default function AdminApp() {
     }
   }
 
+  async function handleSkipCurrentTrack() {
+    setNowPlayingActionPending(true);
+    setMessage("");
+    setMessageType("info");
+
+    try {
+      await skipCurrentSpotifyTrack();
+      setMessage("Cancion actual saltada.");
+      setMessageType("success");
+    } catch (error) {
+      setMessage(error.message);
+      setMessageType("error");
+    } finally {
+      setNowPlayingActionPending(false);
+    }
+  }
+
   useEffect(() => {
     const audioElement = document.getElementById("audio-player");
     if (audioElement) {
@@ -1332,11 +1366,13 @@ export default function AdminApp() {
         musicSearchResults={musicSearchResults}
         musicSearching={musicSearching}
         musicActionPending={musicActionPending}
+        nowPlayingActionPending={nowPlayingActionPending}
         onDisconnectSpotify={handleDisconnectSpotify}
         onMusicSearchChange={setMusicSearchQuery}
         onAddMusicTrack={handleAddMusicTrack}
         onPlayNextMusicTrack={handlePlayNextMusicTrack}
         onPlayMusicTrackNow={handlePlayMusicTrackNow}
+        onSkipCurrentTrack={handleSkipCurrentTrack}
       />
     </>
   );

@@ -319,6 +319,15 @@ export async function playMusicTrackNow(uri) {
   );
 }
 
+export async function skipCurrentSpotifyTrack() {
+  return readJson(
+    await fetch(apiUrl("/api/spotify/skip"), {
+      method: "POST",
+      credentials: "include",
+    })
+  );
+}
+
 export async function disconnectSpotify() {
   return readJson(
     await fetch(apiUrl("/api/spotify/disconnect"), {

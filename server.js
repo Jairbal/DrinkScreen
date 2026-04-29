@@ -457,6 +457,13 @@ async function resumeSpotifyPlayback(request) {
   });
 }
 
+async function skipSpotifyTrack(request) {
+  const deviceId = await getActiveSpotifyDevice(request);
+  await spotifyApi(request, `/me/player/next?device_id=${encodeURIComponent(deviceId)}`, {
+    method: "POST",
+  });
+}
+
 async function getSpotifyPlayerState(request) {
   try {
     return await spotifyApi(request, "/me/player");
@@ -1818,6 +1825,20 @@ function createServer() {
             currentlyPlaying: snapshot.currentlyPlaying || null,
             source: "spotify",
           });
+        })
+        .catch((error) => sendSpotifyError(response, error));
+      return;
+    }
+
+    if (pathname === "/api/spotify/skip" && request.method === "POST") {
+      if (!requireAuth(request, response)) {
+        return;
+      }
+
+      skipSpotifyTrack(request)
+        .then(() => {
+          scheduleSpotifyPlaybackBroadcast("track-skipped", 900);
+          sendJson(response, 200, { ok: true });
         })
         .catch((error) => sendSpotifyError(response, error));
       return;

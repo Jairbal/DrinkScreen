@@ -366,11 +366,21 @@ export default function ScreenApp() {
                 {spotifyQueue.queue.slice(0, 7).map((track, index) => (
                   <div
                     key={`${track.uri}-${index}`}
-                    className="flex min-w-0 gap-4 border-t border-white/10 pt-3"
+                    className="relative flex min-w-0 gap-4 border-t border-white/10 pt-3"
                   >
-                    <span className="flex h-10 w-10 flex-none items-center justify-center rounded-full bg-emerald-300/15 text-lg font-semibold text-emerald-200">
-                      {index + 1}
-                    </span>
+                    <div className="relative h-12 w-12 flex-none overflow-hidden rounded-xl bg-emerald-300/10">
+                      {track.image ? (
+                        <img
+                          src={track.image}
+                          alt=""
+                          className="h-full w-full object-cover opacity-55"
+                          loading="lazy"
+                        />
+                      ) : null}
+                      <span className="absolute inset-0 flex items-center justify-center bg-black/35 text-lg font-semibold text-emerald-100">
+                        {index + 1}
+                      </span>
+                    </div>
                     <div className="min-w-0">
                       <p className="line-clamp-1 text-2xl font-semibold text-white">{track.name}</p>
                       <p className="mt-1 line-clamp-1 text-lg text-slate-300">{track.artists}</p>
@@ -390,7 +400,7 @@ export default function ScreenApp() {
               <img
                 src={nowPlaying.image}
                 alt=""
-                className="h-20 w-20 flex-none rounded-xl object-cover shadow-soft"
+                className="h-20 w-20 flex-none rounded-xl object-cover opacity-70 shadow-soft"
               />
             ) : null}
             <div className="min-w-0">
