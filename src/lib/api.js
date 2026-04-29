@@ -62,7 +62,7 @@ function toQueueTrack(row) {
   };
 }
 
-function toQueueRow(track) {
+function toPendingRequestRow(track) {
   const now = new Date().toISOString();
   return {
     queue_id: track.queueId || crypto.randomUUID(),
@@ -76,6 +76,7 @@ function toQueueRow(track) {
     duration_ms: Number(track.durationMs) || 0,
     external_url: track.externalUrl || "",
     position: Date.now(),
+    status: "pending",
   };
 }
 
@@ -241,12 +242,17 @@ export async function addSpotifyTrackToQueue(uri) {
 export async function fetchMusicQueue() {
   if (hasSupabaseRequestInbox()) {
     const rows = await readJson(
-      await fetch(supabaseUrl(`${MUSIC_QUEUE_TABLE}?select=*&order=position.asc,added_at.asc`), {
-        cache: "no-store",
-        headers: supabaseHeaders(),
-      })
+      await fetch(
+        supabaseUrl(
+          `${MUSIC_QUEUE_TABLE}?select=*&status=eq.queued&order=position.asc,added_at.asc`
+        ),
+        {
+          cache: "no-store",
+          headers: supabaseHeaders(),
+        }
+      )
     );
-    return { ok: true, queue: rows.map(toQueueTrack), source: "supabase-request-inbox" };
+    return { ok: true, queue: rows.map(toQueueTrack), source: "supabase-spotify-mirror" };
   }
 
   return readJson(await fetch(apiUrl("/api/music-queue"), { cache: "no-store" }));
@@ -254,7 +260,7 @@ export async function fetchMusicQueue() {
 
 export async function addTrackToMusicQueue(track) {
   if (hasSupabaseRequestInbox()) {
-    const row = toQueueRow(track);
+    const row = toPendingRequestRow(track);
     await readJson(
       await fetch(supabaseUrl(MUSIC_QUEUE_TABLE), {
         method: "POST",

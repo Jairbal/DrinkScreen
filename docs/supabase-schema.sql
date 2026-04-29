@@ -9,8 +9,12 @@ create table if not exists public.music_queue (
   image text default '',
   duration_ms integer default 0,
   external_url text default '',
-  position bigint not null default (extract(epoch from now()) * 1000)::bigint
+  position bigint not null default (extract(epoch from now()) * 1000)::bigint,
+  status text not null default 'pending'
 );
+
+alter table public.music_queue
+add column if not exists status text not null default 'pending';
 
 alter table public.music_queue enable row level security;
 
@@ -29,7 +33,11 @@ to anon
 with check (
   uri like 'spotify:track:%'
   and length(name) between 1 and 300
+  and status = 'pending'
 );
 
 create index if not exists music_queue_position_idx
 on public.music_queue (position asc, added_at asc);
+
+create index if not exists music_queue_status_position_idx
+on public.music_queue (status asc, position asc, added_at asc);

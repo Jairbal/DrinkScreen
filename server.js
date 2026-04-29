@@ -525,6 +525,10 @@ function getServerSpotifyRequest() {
 }
 
 function publishSpotifySnapshot(snapshot, reason) {
+  replaceCloudSpotifyQueueMirror(snapshot.queue || []).catch((error) => {
+    console.error("No se pudo espejar la cola de Spotify en Supabase:", error.message);
+  });
+
   broadcastEvent("spotify-playback:update", {
     ...snapshot,
     reason,
@@ -680,7 +684,7 @@ async function readCloudMusicRequests() {
 
   const config = getSupabaseConfig();
   const response = await fetch(
-    supabaseRestUrl(`${config.table}?select=*&order=position.asc,added_at.asc`),
+    supabaseRestUrl(`${config.table}?select=*&status=eq.pending&order=position.asc,added_at.asc`),
     { headers: supabaseRestHeaders() }
   );
   const payload = await readSpotifyResponse(response);
@@ -701,6 +705,50 @@ async function deleteCloudMusicRequest(queueId) {
     }
   );
   await readSpotifyResponse(response);
+}
+
+function spotifyTrackToCloudMirrorRow(track, index) {
+  return {
+    queue_id: `spotify-${index}-${track.id || track.uri}`,
+    added_at: new Date().toISOString(),
+    spotify_id: track.id || track.uri?.split(":").pop() || "",
+    uri: track.uri,
+    name: track.name || "Cancion de Spotify",
+    artists: track.artists || "",
+    album: track.album || "",
+    image: track.image || "",
+    duration_ms: Number(track.durationMs) || 0,
+    external_url: track.externalUrl || "",
+    position: index + 1,
+    status: "queued",
+  };
+}
+
+async function replaceCloudSpotifyQueueMirror(queue = []) {
+  if (!hasCloudMusicRequestInbox()) {
+    return;
+  }
+
+  const config = getSupabaseConfig();
+  const deleteResponse = await fetch(supabaseRestUrl(`${config.table}?status=eq.queued`), {
+    method: "DELETE",
+    headers: supabaseRestHeaders({ Prefer: "return=minimal" }),
+  });
+  await readSpotifyResponse(deleteResponse);
+
+  if (!queue.length) {
+    return;
+  }
+
+  const insertResponse = await fetch(supabaseRestUrl(config.table), {
+    method: "POST",
+    headers: supabaseRestHeaders({
+      "Content-Type": "application/json",
+      Prefer: "return=minimal",
+    }),
+    body: JSON.stringify(queue.map(spotifyTrackToCloudMirrorRow)),
+  });
+  await readSpotifyResponse(insertResponse);
 }
 
 async function syncCloudMusicRequestsToSpotify() {

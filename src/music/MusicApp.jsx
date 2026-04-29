@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   addTrackToMusicQueue,
+  fetchMusicQueue,
   fetchSpotifyStatus,
   searchSpotifyTracks,
   subscribeToServerEvents,
@@ -120,6 +121,41 @@ export default function MusicApp() {
         setError(getFriendlySpotifyError(event.payload.message));
       }
     }, { disabled: !HAS_REALTIME_BACKEND });
+  }, []);
+
+  useEffect(() => {
+    if (HAS_REALTIME_BACKEND) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    let timerId = null;
+
+    async function refreshQueue() {
+      try {
+        const payload = await fetchMusicQueue();
+        if (!cancelled) {
+          setQueue({ queue: payload.queue || [] });
+        }
+      } catch (requestError) {
+        if (!cancelled) {
+          setError(getFriendlySpotifyError(requestError.message));
+        }
+      } finally {
+        if (!cancelled) {
+          timerId = window.setTimeout(refreshQueue, 5000);
+        }
+      }
+    }
+
+    refreshQueue();
+
+    return () => {
+      cancelled = true;
+      if (timerId) {
+        window.clearTimeout(timerId);
+      }
+    };
   }, []);
 
   useEffect(() => {
