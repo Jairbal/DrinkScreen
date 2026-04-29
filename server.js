@@ -31,6 +31,7 @@ const websocketClients = new Set();
 let spotifyAppToken = null;
 let lastSpotifyPlaybackSnapshot = "";
 let lastSpotifyPlaybackPayload = null;
+let syncingCloudMusicRequests = false;
 loadEnvFile();
 
 function loadEnvFile() {
@@ -628,6 +629,96 @@ function scheduleSpotifyQueueSnapshotBroadcast(reason, delayMs = 900) {
       });
     }
   }, delayMs);
+}
+
+function getSupabaseConfig() {
+  return {
+    url: (process.env.SUPABASE_URL || "").replace(/\/+$/, ""),
+    key: process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || "",
+    table: process.env.SUPABASE_MUSIC_QUEUE_TABLE || "music_queue",
+  };
+}
+
+function hasCloudMusicRequestInbox() {
+  const config = getSupabaseConfig();
+  return Boolean(config.url && config.key);
+}
+
+function supabaseRestUrl(path) {
+  const config = getSupabaseConfig();
+  return `${config.url}/rest/v1/${path}`;
+}
+
+function supabaseRestHeaders(extra = {}) {
+  const config = getSupabaseConfig();
+  return {
+    apikey: config.key,
+    Authorization: `Bearer ${config.key}`,
+    ...extra,
+  };
+}
+
+function toCloudMusicRequest(row) {
+  return {
+    queueId: row.queue_id,
+    uri: row.uri,
+    name: row.name || "Cancion de Spotify",
+  };
+}
+
+async function readCloudMusicRequests() {
+  if (!hasCloudMusicRequestInbox()) {
+    return [];
+  }
+
+  const config = getSupabaseConfig();
+  const response = await fetch(
+    supabaseRestUrl(`${config.table}?select=*&order=position.asc,added_at.asc`),
+    { headers: supabaseRestHeaders() }
+  );
+  const payload = await readSpotifyResponse(response);
+  return Array.isArray(payload) ? payload.map(toCloudMusicRequest) : [];
+}
+
+async function deleteCloudMusicRequest(queueId) {
+  if (!queueId || !hasCloudMusicRequestInbox()) {
+    return;
+  }
+
+  const config = getSupabaseConfig();
+  const response = await fetch(
+    supabaseRestUrl(`${config.table}?queue_id=eq.${encodeURIComponent(queueId)}`),
+    {
+      method: "DELETE",
+      headers: supabaseRestHeaders({ Prefer: "return=minimal" }),
+    }
+  );
+  await readSpotifyResponse(response);
+}
+
+async function syncCloudMusicRequestsToSpotify() {
+  if (syncingCloudMusicRequests || !hasCloudMusicRequestInbox()) {
+    return;
+  }
+
+  syncingCloudMusicRequests = true;
+  try {
+    const requests = await readCloudMusicRequests();
+    if (!requests.length) {
+      return;
+    }
+
+    const spotifyRequest = getServerSpotifyRequest();
+    for (const request of requests) {
+      await addSpotifyTrackToQueue(spotifyRequest, request.uri);
+      await deleteCloudMusicRequest(request.queueId);
+    }
+    scheduleSpotifyQueueSnapshotBroadcast("cloud-requests-added", 900);
+  } catch (error) {
+    console.error("No se pudieron sincronizar pedidos cloud con Spotify:", error.message);
+  } finally {
+    syncingCloudMusicRequests = false;
+  }
 }
 
 async function sendSpotifyError(response, error) {
@@ -1959,4 +2050,8 @@ setInterval(() => {
   if (websocketClients.size > 0) {
     broadcastSpotifyPlayback("poll").catch(() => {});
   }
+}, 5000);
+
+setInterval(() => {
+  syncCloudMusicRequestsToSpotify().catch(() => {});
 }, 5000);

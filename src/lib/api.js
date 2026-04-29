@@ -10,6 +10,9 @@ async function readJson(response) {
 }
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "";
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || "";
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
+const MUSIC_QUEUE_TABLE = import.meta.env.VITE_SUPABASE_MUSIC_QUEUE_TABLE || "music_queue";
 
 function apiUrl(path) {
   return `${API_BASE_URL}${path}`;
@@ -26,7 +29,61 @@ function websocketUrl(path) {
   return baseUrl.toString();
 }
 
+function hasSupabaseRequestInbox() {
+  const isPublicMusicPage =
+    window.location.pathname === "/music" || window.location.pathname === "/music.html";
+  return Boolean(isPublicMusicPage && !API_BASE_URL && SUPABASE_URL && SUPABASE_ANON_KEY);
+}
+
+function supabaseUrl(path) {
+  return `${SUPABASE_URL.replace(/\/+$/, "")}/rest/v1/${path}`;
+}
+
+function supabaseHeaders(extra = {}) {
+  return {
+    apikey: SUPABASE_ANON_KEY,
+    Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+    ...extra,
+  };
+}
+
+function toQueueTrack(row) {
+  return {
+    queueId: row.queue_id,
+    addedAt: row.added_at,
+    id: row.spotify_id,
+    uri: row.uri,
+    name: row.name,
+    artists: row.artists,
+    album: row.album,
+    image: row.image,
+    durationMs: row.duration_ms || 0,
+    externalUrl: row.external_url || "",
+  };
+}
+
+function toQueueRow(track) {
+  const now = new Date().toISOString();
+  return {
+    queue_id: track.queueId || crypto.randomUUID(),
+    added_at: track.addedAt || now,
+    spotify_id: track.id || track.uri?.split(":").pop() || "",
+    uri: track.uri,
+    name: track.name || "Cancion de Spotify",
+    artists: track.artists || "",
+    album: track.album || "",
+    image: track.image || "",
+    duration_ms: Number(track.durationMs) || 0,
+    external_url: track.externalUrl || "",
+    position: Date.now(),
+  };
+}
+
 export function subscribeToServerEvents(onEvent, options = {}) {
+  if (options.disabled) {
+    return () => {};
+  }
+
   let socket = null;
   let closedByClient = false;
   let reconnectTimer = null;
@@ -182,10 +239,35 @@ export async function addSpotifyTrackToQueue(uri) {
 }
 
 export async function fetchMusicQueue() {
+  if (hasSupabaseRequestInbox()) {
+    const rows = await readJson(
+      await fetch(supabaseUrl(`${MUSIC_QUEUE_TABLE}?select=*&order=position.asc,added_at.asc`), {
+        cache: "no-store",
+        headers: supabaseHeaders(),
+      })
+    );
+    return { ok: true, queue: rows.map(toQueueTrack), source: "supabase-request-inbox" };
+  }
+
   return readJson(await fetch(apiUrl("/api/music-queue"), { cache: "no-store" }));
 }
 
 export async function addTrackToMusicQueue(track) {
+  if (hasSupabaseRequestInbox()) {
+    const row = toQueueRow(track);
+    await readJson(
+      await fetch(supabaseUrl(MUSIC_QUEUE_TABLE), {
+        method: "POST",
+        headers: supabaseHeaders({
+          "Content-Type": "application/json",
+          Prefer: "return=representation",
+        }),
+        body: JSON.stringify(row),
+      })
+    );
+    return fetchMusicQueue();
+  }
+
   return readJson(
     await fetch(apiUrl("/api/music-queue"), {
       method: "POST",

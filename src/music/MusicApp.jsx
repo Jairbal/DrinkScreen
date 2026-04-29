@@ -6,6 +6,8 @@ import {
   subscribeToServerEvents,
 } from "../lib/api";
 
+const HAS_REALTIME_BACKEND = Boolean(import.meta.env.VITE_API_BASE_URL);
+
 function TrackArtwork({ track, className = "h-16 w-16" }) {
   if (track?.image) {
     return (
@@ -117,7 +119,7 @@ export default function MusicApp() {
       } else if (event.payload?.message) {
         setError(getFriendlySpotifyError(event.payload.message));
       }
-    });
+    }, { disabled: !HAS_REALTIME_BACKEND });
   }, []);
 
   useEffect(() => {
